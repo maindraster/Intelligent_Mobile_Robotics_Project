@@ -1,8 +1,10 @@
 from flight_environment import FlightEnvironment
+from path_planner import AStarPlanner
+from trajectory_generator import TrajectoryGenerator
 
 env = FlightEnvironment(50)
-start = (1,2,0)
-goal = (18,18,3)
+start = (1, 2, 0)
+goal = (18, 18, 3)
 
 # --------------------------------------------------------------------------------------------------- #
 # Call your path planning algorithm here. 
@@ -13,7 +15,14 @@ goal = (18,18,3)
 #   - column 3 contains the z-coordinates of all path points
 # This `path` array will be provided to the `env` object for visualization.
 
-path = [[0,0,0],[1,1,1],[2,2,2],[3,3,3]]
+print("Starting A* path planning...")
+planner = AStarPlanner(env, resolution=0.5)
+raw_path = planner.plan(start, goal)
+print(f"Raw path found with {len(raw_path)} waypoints")
+
+# Smooth the path
+path = planner.smooth_path(raw_path, iterations=50)
+print(f"Smoothed path has {len(path)} waypoints")
 
 # --------------------------------------------------------------------------------------------------- #
 
@@ -34,12 +43,16 @@ env.plot_cylinders(path)
 #   points on the same figure to clearly show how the continuous trajectory
 #   follows these path points.
 
+print("Generating smooth trajectory...")
+traj_gen = TrajectoryGenerator(path, velocity=2.0)
+t_array, trajectory, waypoint_times = traj_gen.generate(num_points=200)
+print(f"Trajectory generated with {len(trajectory)} points")
+print(f"Total flight time: {t_array[-1]:.2f} seconds")
 
-
+# Plot trajectory
+traj_gen.plot_trajectory(t_array, trajectory, waypoint_times)
 
 # --------------------------------------------------------------------------------------------------- #
-
-
 
 # You must manage this entire project using Git. 
 # When submitting your assignment, upload the project to a code-hosting platform 
