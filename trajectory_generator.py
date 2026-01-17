@@ -167,69 +167,44 @@ class TrajectoryGenerator:
         plt.tight_layout()
         plt.show()
 
-    def evaluate_trajectory_quality(self, t_array, trajectory):
-        """
-        为原始Cubic Spline添加轨迹质量评估
-        """
-        dt = t_array[1] - t_array[0]
-        
-        # 计算速度
-        velocity = np.gradient(trajectory, dt, axis=0)
-        velocity_magnitude = np.linalg.norm(velocity, axis=1)
-        
-        # 计算加速度
-        acceleration = np.gradient(velocity, dt, axis=0)
-        acceleration_magnitude = np.linalg.norm(acceleration, axis=1)
-        
-        # 计算Jerk
-        jerk = np.gradient(acceleration, dt, axis=0)
-        jerk_magnitude = np.linalg.norm(jerk, axis=1)
-        
-        # 计算航点偏差
-        waypoint_deviations = []
-        for waypoint in self.path:
-            distances = np.linalg.norm(trajectory - waypoint, axis=1)
-            min_distance = np.min(distances)
-            waypoint_deviations.append(min_distance)
-        
-        # Jerk成本
-        jerk_cost = np.sum(jerk_magnitude**2) * dt
-        
-        metrics = {
-            'max_velocity': np.max(velocity_magnitude),
-            'avg_velocity': np.mean(velocity_magnitude),
-            'max_acceleration': np.max(acceleration_magnitude),
-            'avg_acceleration': np.mean(acceleration_magnitude),
-            'max_jerk': np.max(jerk_magnitude),
-            'avg_jerk': np.mean(jerk_magnitude),
-            'jerk_cost': jerk_cost,
-            'max_waypoint_deviation': np.max(waypoint_deviations),
-            'avg_waypoint_deviation': np.mean(waypoint_deviations),
-        }
-        
-        return metrics
+class QuinticPolynomialTrajectory(TrajectoryGenerator):
 
-class MinimumSnapTrajectory(TrajectoryGenerator):
-    """
-    Minimum Snap Trajectory Generator
-    Generates smoother trajectories by minimizing snap (4th derivative)
-    """
-    
     def __init__(self, path, velocity=2.0):
         super().__init__(path, velocity)
     
     def quintic_polynomial_coefficients(self, points, times):
         """
         Compute quintic (5th order) polynomial coefficients
-        Provides continuity up to acceleration
+        ✅ 改进：使用更好的速度和加速度估计
         """
         n = len(points) - 1
-        
-        # For each segment, we use quintic polynomial: p(t) = a0 + a1*t + a2*t^2 + a3*t^3 + a4*t^4 + a5*t^5
-        # Constraints: position, velocity, acceleration at start and end
-        
         coeffs = []
         
+        velocities = []
+        for i in range(len(points)):
+            if i == 0:
+                # 起点：使用前向差分
+                v = (points[i+1] - points[i]) / (times[i+1] - times[i])
+            elif i == len(points) - 1:
+                # 终点：使用后向差分
+                v = (points[i] - points[i-1]) / (times[i] - times[i-1])
+            else:
+                # 中间点：使用中心差分（更平滑）
+                dt_prev = times[i] - times[i-1]
+                dt_next = times[i+1] - times[i]
+                
+                # 加权平均，考虑时间间隔
+                w_prev = dt_next / (dt_prev + dt_next)
+                w_next = dt_prev / (dt_prev + dt_next)
+                
+                v_prev = (points[i] - points[i-1]) / dt_prev
+                v_next = (points[i+1] - points[i]) / dt_next
+                
+                v = w_prev * v_prev + w_next * v_next
+            
+            velocities.append(v)
+        
+        # 为每个段生成系数
         for i in range(n):
             t0 = times[i]
             t1 = times[i+1]
@@ -237,25 +212,23 @@ class MinimumSnapTrajectory(TrajectoryGenerator):
             
             p0 = points[i]
             p1 = points[i+1]
+            v0 = velocities[i]
+            v1 = velocities[i+1]
             
-            # Estimate velocities at waypoints (using finite differences)
+            # ✅ 改进：估计加速度（使用速度的变化率）
             if i == 0:
-                v0 = (points[i+1] - points[i]) / (times[i+1] - times[i])
+                a0 = 0  # 起点加速度为0
             else:
-                v0 = (points[i+1] - points[i-1]) / (times[i+1] - times[i-1])
+                dt_prev = times[i] - times[i-1]
+                a0 = (velocities[i] - velocities[i-1]) / dt_prev * 0.5  # 减小加速度突变
             
             if i == n - 1:
-                v1 = (points[i+1] - points[i]) / (times[i+1] - times[i])
+                a1 = 0  # 终点加速度为0
             else:
-                v1 = (points[i+2] - points[i]) / (times[i+2] - times[i])
+                dt_next = times[i+2] - times[i+1]
+                a1 = (velocities[i+2] - velocities[i+1]) / dt_next * 0.5
             
-            # Assume zero acceleration at waypoints for smoothness
-            a0 = 0
-            a1 = 0
-            
-            # Solve for quintic coefficients
-            # Boundary conditions: p(0)=p0, p(dt)=p1, v(0)=v0, v(dt)=v1, a(0)=a0, a(dt)=a1
-            
+            # 构建线性方程组求解quintic系数
             A = np.array([
                 [1, 0, 0, 0, 0, 0],
                 [0, 1, 0, 0, 0, 0],
@@ -267,7 +240,12 @@ class MinimumSnapTrajectory(TrajectoryGenerator):
             
             b = np.array([p0, v0, a0, p1, v1, a1])
             
-            coeff = np.linalg.solve(A, b)
+            try:
+                coeff = np.linalg.solve(A, b)
+            except np.linalg.LinAlgError:
+                # 如果求解失败，使用最小二乘
+                coeff = np.linalg.lstsq(A, b, rcond=None)[0]
+            
             coeffs.append(coeff)
         
         return coeffs
@@ -292,7 +270,6 @@ class MinimumSnapTrajectory(TrajectoryGenerator):
         return coeff[0] + coeff[1]*dt + coeff[2]*dt**2 + coeff[3]*dt**3 + coeff[4]*dt**4 + coeff[5]*dt**5
     
     def generate(self, num_points=200):
-        """Generate minimum snap trajectory"""
         times = self.compute_time_allocation()
         
         # Generate quintic polynomial coefficients for each axis
@@ -310,57 +287,6 @@ class MinimumSnapTrajectory(TrajectoryGenerator):
             trajectory[i, 2] = self.evaluate_quintic(z_coeffs, times, t)
         
         return t_array, trajectory, times
-    
-    def evaluate_trajectory_quality(self, t_array, trajectory):
-        """
-        Evaluate trajectory quality metrics
-        
-        Returns:
-            dict: Quality metrics including velocity, acceleration, jerk
-        """
-        dt = t_array[1] - t_array[0]
-        
-        # Calculate velocity (first derivative)
-        velocity = np.gradient(trajectory, dt, axis=0)
-        velocity_magnitude = np.linalg.norm(velocity, axis=1)
-        
-        # Calculate acceleration (second derivative)
-        acceleration = np.gradient(velocity, dt, axis=0)
-        acceleration_magnitude = np.linalg.norm(acceleration, axis=1)
-        
-        # Calculate jerk (third derivative)
-        jerk = np.gradient(acceleration, dt, axis=0)
-        jerk_magnitude = np.linalg.norm(jerk, axis=1)
-        
-        # Calculate snap (fourth derivative) - optional
-        snap = np.gradient(jerk, dt, axis=0)
-        snap_magnitude = np.linalg.norm(snap, axis=1)
-        
-        # Calculate waypoint deviation
-        waypoint_deviations = []
-        for waypoint in self.path:
-            # Find closest point on trajectory
-            distances = np.linalg.norm(trajectory - waypoint, axis=1)
-            min_distance = np.min(distances)
-            waypoint_deviations.append(min_distance)
-        
-        # Jerk cost (smoothness metric)
-        jerk_cost = np.sum(jerk_magnitude**2) * dt
-        
-        metrics = {
-            'max_velocity': np.max(velocity_magnitude),
-            'avg_velocity': np.mean(velocity_magnitude),
-            'max_acceleration': np.max(acceleration_magnitude),
-            'avg_acceleration': np.mean(acceleration_magnitude),
-            'max_jerk': np.max(jerk_magnitude),
-            'avg_jerk': np.mean(jerk_magnitude),
-            'jerk_cost': jerk_cost,
-            'max_snap': np.max(snap_magnitude),
-            'max_waypoint_deviation': np.max(waypoint_deviations),
-            'avg_waypoint_deviation': np.mean(waypoint_deviations),
-        }
-        
-        return metrics
     
     def plot_trajectory(self, t_array, trajectory, waypoint_times, fig=None):
         """Plot trajectory with enhanced visualization"""
@@ -401,3 +327,77 @@ class MinimumSnapTrajectory(TrajectoryGenerator):
         axes[0].set_title('Trajectory Time History', fontsize=14, fontweight='bold')
         plt.tight_layout()
         plt.show()
+
+def evaluate_trajectory_quality(trajectory, t_array, waypoints):
+    """
+    统一的轨迹质量评估函数
+    专门用于对比 Cubic Spline vs Quintic Polynomial
+    
+    Returns:
+        dict: Quality metrics
+            - max_velocity: 最大速度 (m/s)
+            - avg_velocity: 平均速度 (m/s)
+            - max_acceleration: 最大加速度 (m/s²)
+            - max_jerk: 最大 jerk (m/s³) - 关键对比指标
+            - jerk_cost: jerk 积分 - 关键对比指标
+            - max_waypoint_deviation: 最大航点偏差 (m)
+    """
+    trajectory = np.array(trajectory)
+    t_array = np.array(t_array)
+    waypoints = np.array(waypoints)
+    
+    dt = t_array[1] - t_array[0]
+    
+    # 计算导数
+    velocity = np.gradient(trajectory, dt, axis=0)
+    velocity_magnitude = np.linalg.norm(velocity, axis=1)
+    
+    acceleration = np.gradient(velocity, dt, axis=0)
+    acceleration_magnitude = np.linalg.norm(acceleration, axis=1)
+    
+    jerk = np.gradient(acceleration, dt, axis=0)
+    jerk_magnitude = np.linalg.norm(jerk, axis=1)
+    
+    # 计算航点偏差
+    waypoint_deviations = []
+    for waypoint in waypoints:
+        distances = np.linalg.norm(trajectory - waypoint, axis=1)
+        min_distance = np.min(distances)
+        waypoint_deviations.append(min_distance)
+    
+    # 计算平滑度成本
+    jerk_cost = np.sum(jerk_magnitude**2) * dt
+    
+    metrics = {
+        'max_velocity': np.max(velocity_magnitude),
+        'avg_velocity': np.mean(velocity_magnitude),
+        'max_acceleration': np.max(acceleration_magnitude),
+        'max_jerk': np.max(jerk_magnitude),
+        'jerk_cost': jerk_cost,
+        'max_waypoint_deviation': np.max(waypoint_deviations),
+    }
+    
+    return metrics
+
+def print_trajectory_metrics(metrics):
+    print(f"\nQuinticPolynomialVelocity:")
+    print(f"  Max:     {metrics['max_velocity']:.4f} m/s")
+    print(f"  Average: {metrics['avg_velocity']:.4f} m/s")
+    
+    print(f"\nQuinticPolynomialAcceleration:")
+    print(f"  Max:     {metrics['max_acceleration']:.4f} m/s²")
+    
+    print(f"\nQuinticPolynomialJerk (smoothness):")
+    print(f"  Max:     {metrics['max_jerk']:.4f} m/s³")
+    print(f"  Cost:    {metrics['jerk_cost']:.4f}")
+    
+    print(f"\nQuinticPolynomialWaypoint Deviation:")
+    print(f"  Max:     {metrics['max_waypoint_deviation']:.4f} m")
+    
+    # 检查约束
+    if metrics['max_waypoint_deviation'] > 0.1:
+        print(f"  WARNING: Exceeds 0.1m limit!")
+    else:
+        print(f"  Within 0.1m limit")
+    
+    print(f"{'='*60}\n")

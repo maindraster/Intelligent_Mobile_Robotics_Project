@@ -78,7 +78,7 @@ class PathPlannerBase:
     
     def evaluate_path_quality(self, path):
         """
-        Evaluate path quality with multiple metrics
+        Evaluate path quality with essential metrics
         
         Parameters:
             path: N×3 numpy array of waypoints
@@ -88,31 +88,26 @@ class PathPlannerBase:
                 - total_length: total path length in meters
                 - num_waypoints: number of waypoints
                 - avg_segment_length: average distance between consecutive waypoints
-                - max_segment_length: maximum segment length
-                - min_segment_length: minimum segment length
                 - smoothness: average curvature (lower is smoother)
-                - max_curvature: maximum curvature
-                - avg_turn_angle: average turning angle in degrees
                 - max_turn_angle: maximum turning angle in degrees
         """
         if len(path) < 2:
             return {}
         
-        # Calculate total path length
-        total_length = 0
+        # 1. Calculate path length
         segment_lengths = []
         for i in range(len(path) - 1):
             length = np.linalg.norm(path[i+1] - path[i])
-            total_length += length
             segment_lengths.append(length)
         
-        # Calculate turning angles (measure of smoothness)
+        total_length = np.sum(segment_lengths)
+        
+        # 2. Calculate turning angles (simpler and more intuitive than curvature)
         turn_angles = []
         for i in range(1, len(path) - 1):
             v1 = path[i] - path[i-1]
             v2 = path[i+1] - path[i]
             
-            # Normalize vectors
             v1_norm = np.linalg.norm(v1)
             v2_norm = np.linalg.norm(v2)
             
@@ -122,31 +117,10 @@ class PathPlannerBase:
                 angle = np.arccos(cos_angle)
                 turn_angles.append(np.degrees(angle))
         
-        # Calculate curvature (smoothness metric)
-        # Using Menger curvature for three consecutive points
-        curvatures = []
-        for i in range(1, len(path) - 1):
-            p1, p2, p3 = path[i-1], path[i], path[i+1]
-            
-            a = np.linalg.norm(p2 - p1)
-            b = np.linalg.norm(p3 - p2)
-            c = np.linalg.norm(p3 - p1)
-            
-            # Menger curvature: κ = 4 * Area / (a * b * c)
-            if a > 1e-6 and b > 1e-6 and c > 1e-6:
-                s = (a + b + c) / 2  # semi-perimeter
-                area = np.sqrt(max(0, s * (s-a) * (s-b) * (s-c)))  # Heron's formula
-                curvature = 4 * area / (a * b * c)
-                curvatures.append(curvature)
-        
         metrics = {
             'total_length': total_length,
             'num_waypoints': len(path),
             'avg_segment_length': np.mean(segment_lengths) if segment_lengths else 0,
-            'max_segment_length': np.max(segment_lengths) if segment_lengths else 0,
-            'min_segment_length': np.min(segment_lengths) if segment_lengths else 0,
-            'smoothness': np.mean(curvatures) if curvatures else 0,
-            'max_curvature': np.max(curvatures) if curvatures else 0,
             'avg_turn_angle': np.mean(turn_angles) if turn_angles else 0,
             'max_turn_angle': np.max(turn_angles) if turn_angles else 0,
         }
@@ -418,119 +392,6 @@ class RRTPlanner(PathPlannerBase):
         # No path found within max iterations
         raise ValueError(f"No valid path found after {self.max_iterations} iterations!")
     
-class RRTStarPlanner(RRTPlanner):
-    """
-    RRT* - Optimal version of RRT with rewiring
-    Provides asymptotically optimal paths
-    """
-    def __init__(self, env, step_size=1.0, max_iterations=5000, 
-                 goal_sample_rate=0.1, rewire_radius=2.0):
-        super().__init__(env, step_size, max_iterations, goal_sample_rate)
-        self.rewire_radius = rewire_radius
-        
-    def get_nearby_nodes(self, tree, position, radius):
-        """Find all nodes within radius of position"""
-        nearby = []
-        for node in tree:
-            if self.distance(node.position, position) <= radius:
-                nearby.append(node)
-        return nearby
-    
-    def choose_parent(self, tree, new_node, nearby_nodes):
-        """Choose the best parent from nearby nodes to minimize cost"""
-        if not nearby_nodes:
-            return None
-        
-        min_cost = float('inf')
-        best_parent = None
-        
-        for node in nearby_nodes:
-            # Calculate cost through this node
-            cost = node.cost + self.distance(node.position, new_node.position)
-            
-            # Check if path is collision-free and cost is better
-            if cost < min_cost and self.is_path_collision_free(node.position, new_node.position):
-                min_cost = cost
-                best_parent = node
-        
-        if best_parent:
-            new_node.parent = best_parent
-            new_node.cost = min_cost
-            
-        return best_parent
-    
-    def rewire(self, tree, new_node, nearby_nodes):
-        """Rewire the tree to reduce cost through new_node"""
-        for node in nearby_nodes:
-            if node == new_node or node == new_node.parent:
-                continue
-            
-            # Calculate new cost through new_node
-            new_cost = new_node.cost + self.distance(new_node.position, node.position)
-            
-            # If new path is better and collision-free, rewire
-            if new_cost < node.cost and self.is_path_collision_free(new_node.position, node.position):
-                node.parent = new_node
-                node.cost = new_cost
-    
-    def plan(self, start, goal):
-        """RRT* path planning with rewiring"""
-        # Validate start and goal
-        if self.env.is_outside(start) or self.env.is_collide(start):
-            raise ValueError("Start position is invalid!")
-        if self.env.is_outside(goal) or self.env.is_collide(goal):
-            raise ValueError("Goal position is invalid!")
-        
-        # Initialize tree
-        start_node = self.Node(start)
-        tree = [start_node]
-        best_goal_node = None
-        
-        # Main RRT* loop
-        for iteration in range(self.max_iterations):
-            # Sample random point
-            random_point = self.sample_random_point(goal)
-            
-            # Find nearest node
-            nearest_node = self.get_nearest_node(tree, random_point)
-            
-            # Steer towards random point
-            new_pos = self.steer(nearest_node.position, random_point)
-            
-            # Create new node
-            new_node = self.Node(new_pos)
-            
-            # Find nearby nodes for rewiring
-            nearby_nodes = self.get_nearby_nodes(tree, new_pos, self.rewire_radius)
-            
-            # Choose best parent
-            parent = self.choose_parent(tree, new_node, nearby_nodes)
-            
-            if parent is not None:
-                tree.append(new_node)
-                
-                # Rewire tree
-                self.rewire(tree, new_node, nearby_nodes)
-                
-                # Check if we can reach goal
-                if self.distance(new_pos, goal) < self.step_size:
-                    if self.is_path_collision_free(new_pos, goal):
-                        goal_node = self.Node(goal)
-                        goal_node.parent = new_node
-                        goal_node.cost = new_node.cost + self.distance(new_pos, goal)
-                        
-                        # Keep the best goal node
-                        if best_goal_node is None or goal_node.cost < best_goal_node.cost:
-                            best_goal_node = goal_node
-                            print(f"RRT*: Better path found at iteration {iteration + 1}, cost = {goal_node.cost:.2f}")
-        
-        if best_goal_node is None:
-            raise ValueError(f"No valid path found after {self.max_iterations} iterations!")
-        
-        path = self.reconstruct_path(best_goal_node)
-        print(f"RRT*: Final path with {len(tree)} nodes, total cost = {best_goal_node.cost:.2f}")
-        return path
-
 def get_bounds(self):
     """
     Get the boundaries of the flight environment.

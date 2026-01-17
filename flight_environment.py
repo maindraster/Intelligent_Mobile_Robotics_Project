@@ -6,7 +6,7 @@ from math import sin,cos,tan
 from mpl_toolkits.mplot3d import Axes3D
 
 class FlightEnvironment:
-    def __init__(self,obs_num):
+    def __init__(self, obs_num, start=None, goal=None, safe_radius=0.5):
         self.env_width = 20.0
         self.env_length = 20.0
         self.env_height = 5
@@ -14,9 +14,20 @@ class FlightEnvironment:
         self._obs_num = obs_num
 
         self.cylinders = self.generate_random_cylinders(self.space_size,self._obs_num,0.1,0.3,5,5)
-
-
-
+        
+        # 移除与起点/终点冲突的圆柱
+        protected_points = [p for p in [start, goal] if p is not None]
+        for point in protected_points:
+            px, py, pz = point
+            valid_cylinders = []
+            for cx, cy, h, r in self.cylinders:
+                if 0 <= pz <= h:
+                    dist = np.hypot(cx - px, cy - py)
+                    if dist >= r + safe_radius:
+                        valid_cylinders.append([cx, cy, h, r])
+                else:
+                    valid_cylinders.append([cx, cy, h, r])
+            self.cylinders = np.array(valid_cylinders) if valid_cylinders else np.empty((0, 4))
 
     def generate_random_cylinders(self,space_size, N,
                               min_radius, max_radius,
